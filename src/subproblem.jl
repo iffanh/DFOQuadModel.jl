@@ -9,8 +9,7 @@ function solve_subproblem(M, r)
     JuMP.@variable(model, α)
     JuMP.@objective(model, Max, α)
 
-    xf = DynamicPolynomials.variables(M.mf)
-    x = DynamicPolynomials.variables(M.mci[1])
+    x = DynamicPolynomials.variables(M.mf)
 
     the_sum = sum((x[j] - center[j])^2 for j in eachindex(center))
     tr_expr = r^2 - the_sum

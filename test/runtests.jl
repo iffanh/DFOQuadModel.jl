@@ -32,3 +32,55 @@ using Test
     @test abs(x_opt[2] - -0.25) < tol 
 
 end
+
+@testitem "Filter" begin
+    
+    using DFOQuadModel
+
+    ℱ = []
+    f = 2.0
+    ϑ = 10.0
+    ℱ, accepted = DFOQuadModel._update_filter!(ℱ, f, ϑ)
+
+    @test ℱ == [(2.0, 10.0)]
+    @test accepted == true
+
+    function test_filter_update()
+        ℱ = []
+        test_points = [(2.0, 10.0, true),
+                    (11.0, 2.0, true), 
+                    (4.0, 3.0, true), 
+                    (4.0, 3.0, false), 
+                    (2.0, 2.0, true)]
+
+        for (f, ϑ, boolean) in test_points
+            ℱ, accepted = DFOQuadModel._update_filter!(ℱ, f, ϑ)
+            @test accepted == boolean
+
+            if accepted
+                ℱ = DFOQuadModel.add_to_filter!(ℱ, f, ϑ)
+            end
+
+        end
+    end
+
+    test_filter_update()
+
+end
+
+@testitem "Rosenbrock" begin
+    using DFOQuadModel
+
+    function rosenbrock(x::Vector{Float64}; a::Float64=1.0, b::Float64=100.0)
+        return (a - x[1])^2 + b * (x[2] - x[1]^2)^2
+    end
+
+    x0 = [-0.5, -0.5]
+    dftr = DFOQuadModel.DFTR(rosenbrock, 
+                             x0, 
+                             [], 
+                             []; 
+                             max_iteration=100, 
+                             max_points="maximum")
+    DFOQuadModel.optimize!(dftr)
+end
