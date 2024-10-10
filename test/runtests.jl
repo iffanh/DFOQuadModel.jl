@@ -77,10 +77,22 @@ end
 
     x0 = [-0.5, -0.5]
     dftr = DFOQuadModel.DFTR(rosenbrock, 
-                             x0, 
-                             [], 
-                             []; 
-                             max_iteration=100, 
-                             max_points="maximum")
-    DFOQuadModel.optimize!(dftr)
+                            x0, 
+                            [], 
+                            []; 
+                            max_iteration=200,
+                            radius_factor_0=0.7,
+                            radius_factor_1=0.9,
+                            radius_factor_2=1.5,
+                            ratio_threshold_1=1e-12,
+                            ratio_threshold_2=1e-11,
+                            stopping_radius=1e-16,
+                            poisedness_threshold=100.0,
+                            max_points="maximum")
+    res = DFOQuadModel.optimize!(dftr)
+
+    tol = 1e-2
+    @test abs(res.x[1] - 1.0) < tol
+    @test abs(res.x[2] - 1.0) < tol
+    @test abs(res.of - 0.0) < tol
 end

@@ -2,6 +2,7 @@ module DFOQuadModel
 
 using LagrangePoly
 using JuMP
+using LRUCache
 using SumOfSquares
 using CSDP
 using DynamicPolynomials

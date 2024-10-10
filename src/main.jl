@@ -50,6 +50,23 @@ function DFTR(
     return DFTR(f, x0, ci, ce, hyperparameters)
 end
 
+struct OptimizationResult
+    #=
+    Contains the result of the optimization
+    =#
+
+    x
+    of
+    ci
+    ce
+    v
+    niter
+    misses
+    hits
+    status
+
+end
+
 
 struct InterpolationSet
     X::Matrix{Float64}
@@ -90,9 +107,6 @@ function _update_filter!(ℱ::Vector{Any}, f::Float64, ϑ::Float64)
             append!(conds, cond)
         end 
         accepted = all(conds)
-        # if accepted
-        #     push!(ℱ, (f, ϑ))
-        # end
 
         return ℱ, accepted
     end
@@ -122,7 +136,7 @@ function evaluate(X::Matrix{Float64}, f, ci, ce)
     Ce = []
     ϑs = Vector{Float64}()
     for i in eachindex(X[:,1])
-        f_, ci_, ce_, ϑ = evaluate_single_point(X[i,:], f, ci, ce)
+        f_, ci_, ce_, ϑ = cached_evaluate_single_point(X[i,:], f, ci, ce)
         push!(F, f_)
         push!(Ci, ci_)
         push!(Ce, ce_)
@@ -132,8 +146,9 @@ function evaluate(X::Matrix{Float64}, f, ci, ce)
     Ci = reduce(hcat, Ci)
     Ce = reduce(hcat, Ce)
 
-    sorted_indices = reorder_samples!(F, ϑs)
+    sorted_indices = reorder_samples(F, ϑs)
     X = X[sorted_indices,:]
+    F = F[sorted_indices]
     Ci = Ci[:,sorted_indices]
     Ce = Ce[:,sorted_indices]
     ϑs = ϑs[sorted_indices]
@@ -141,7 +156,15 @@ function evaluate(X::Matrix{Float64}, f, ci, ce)
     return InterpolationSet(X, F, Ci, Ce, ϑs)
 end
 
-function evaluate_single_point(x::Vector{Float64}, f, ci, ce)
+const lru = LRUCache.LRU{Tuple{Vector{Float64}, Function, Vector{Any}, Vector{Any}}, Tuple{Float64, Vector{Any}, Vector{Any}, Float64}}(maxsize=64)
+
+function cached_evaluate_single_point(x::Vector{Float64}, f::Function, ci::Vector{Any}, ce::Vector{Any})
+    LRUCache.get!(lru, (x, f, ci, ce)) do
+        evaluate_single_point(x, f, ci, ce)
+    end
+end
+
+function evaluate_single_point(x::Vector{Float64}, f::Function, ci::Vector{Any}, ce::Vector{Any})
 
     f_ = f(x)
     ci_ = [c(x) for c in ci]
@@ -215,8 +238,8 @@ function improve_model!(X, r::Float64, Λth::Float64)
     n = size(X)[2]
     m = 2
 
-    lpolys = LagrangePoly.generate_lagrange_bases(n, m, X)
-    lpolys, X = LagrangePoly.model_improvement!(lpolys, X, r, Λth)
+    ℓs = LagrangePoly.generate_lagrange_bases(n, m, X)
+    ℓs, X = LagrangePoly.model_improvement!(ℓs, X, r, Λth)
     return X
 end
 
@@ -230,7 +253,7 @@ function update_trust_region_radius!(Δ, ρ, η₁, η₂, γ₀, γ₁, γ₂)
     end
 end
 
-function reorder_samples!(F, ϑs)
+function reorder_samples(F, ϑs)
 
     indices = sortperm(1:length(F), by = i -> (ϑs[i], F[i]))
 
@@ -250,6 +273,11 @@ function delete_point!(X::Matrix{Float64}, Δ::Float64, pₘ::Int64)
         lpolys = LagrangePoly.generate_lagrange_bases(n, m, X)
         Λs = LagrangePoly.compute_poisedness(X[1,:], Δ, lpolys)
         index_to_delete = max(sortperm(Λs)...)
+
+        if index_to_delete == size(X)[1]
+            index_to_delete = size(X)[1] - 1
+        end
+
         X = X[1:end .!= index_to_delete, :]
         return X
     end
@@ -268,7 +296,7 @@ function optimize!(optimizer::DFTR)
     max_iter = optimizer.hyperparameters[:max_iteration]
     Λth = optimizer.hyperparameters[:poisedness_threshold]
     Δ₀ = optimizer.hyperparameters[:initial_radius]
-    r_min = optimizer.hyperparameters[:stopping_radius]
+    Δₛ = optimizer.hyperparameters[:stopping_radius]
 
 
     γ₀ = optimizer.hyperparameters[:radius_factor_0]
@@ -286,54 +314,70 @@ function optimize!(optimizer::DFTR)
     ## Main loop
     X = M.IS.X
     Δ = Δ₀
-    for k in range(1, max_iter)
+    let k, status
+        for outer k in range(1, max_iter)
+            ## Check condition for termination
 
-        # STEP 1: Improve model
-        X = improve_model!(X, Δ, Λth)
-
-        # println(X, size(X))
-
-        # STEP 2: Evaluate the points
-        IS = evaluate(X, f, ci, ce)
-        M = build_models(IS, x)
-        ℱ = update_filter!(ℱ, IS)
-
-        xbest = IS.X[1,:]
-        fbest = IS.F[1,:]
-        ϑbest = IS.ϑs[1,:]
-        npoint = size(IS.X)[1]
-        println("It. $k, xbest = $xbest, fbest = $fbest, ϑbest = $ϑbest, Δ = $Δ, #points = $npoint")
-
-        # STEP 3: Solve the subproblem and evaluate
-        xinc = solve_subproblem(M, Δ)
-        f_, ci_, ce_, ϑ_ = evaluate_single_point(xinc, f, ci, ce)
-        ℱ, accepted = _update_filter!(ℱ, f_, ϑ_)
-
-        println(xinc, f_, ϑ_)
-
-        
-        if !accepted
-            Δ = γ₀*Δ
-
-            X = vcat(X, xinc')
-            X = delete_point!(X, Δ, pₘ)
-
-        else
-            if M.mf(X[1,:]) - M.mf(xinc) ≥ κᵥ*IS.ϑs[1]
-                ℱ = add_to_filter!(ℱ, f_, ϑ_)
+            if Δ ≤ Δₛ
+                status = "Minimum radius reached"
+                break
+            elseif k == max_iter
+                status = "Maximum iteration reached"
+                break
             end
-            X = vcat(X, xinc')
-            X = delete_point!(X, Δ, pₘ)
+            
 
-            # STEP 4: Update trust-region radius
-            ρₖ = (IS.F[1] - f_)/(M.mf(X[1,:]) - M.mf(xinc))
-            Δ = update_trust_region_radius!(Δ, ρₖ, η₁, η₂, γ₀, γ₁, γ₂)
+            # STEP 1: Improve model
+            X = improve_model!(X, Δ, Λth)
+
+            # STEP 2: Evaluate the points
+            IS = evaluate(X, f, ci, ce)
+            M = build_models(IS, x)
+            ℱ = update_filter!(ℱ, IS)
+
+            xbest = IS.X[1,:]
+            fbest = IS.F[1,:]
+            ϑbest = IS.ϑs[1,:]
+            npoint = size(IS.X)[1]
+            println("It. $k, xbest = $xbest, fbest = $fbest, ϑbest = $ϑbest, Δ = $Δ, #points = $npoint")
+
+            # STEP 3: Solve the subproblem and evaluate
+            xinc = solve_subproblem(M, Δ)
+            f_, ci_, ce_, ϑ_ = cached_evaluate_single_point(xinc, f, ci, ce)
+            ℱ, accepted = _update_filter!(ℱ, f_, ϑ_)
+            
+            if !accepted
+                Δ = γ₀*Δ
+
+                X = vcat(IS.X, xinc')
+                X = delete_point!(X, Δ, pₘ)
+
+            else
+                if M.mf(X[1,:]) - M.mf(xinc) ≥ κᵥ*IS.ϑs[1]
+                    ℱ = add_to_filter!(ℱ, f_, ϑ_)
+                end
+                X = vcat(IS.X, xinc')
+                X = delete_point!(X, Δ, pₘ)
+
+                # STEP 4: Update trust-region radius
+                ρₖ = (IS.F[1] - f_)/(M.mf(X[1,:]) - M.mf(xinc))
+                Δ = update_trust_region_radius!(Δ, ρₖ, η₁, η₂, γ₀, γ₁, γ₂)
+            end
         end
 
+        ## Post-processing
+        res = OptimizationResult(
+            M.IS.X[1,:],
+            M.IS.F[1],
+            M.IS.Ci[:,1],
+            M.IS.Ce[:,1],
+            M.IS.ϑs[1],
+            k,
+            lru.misses,
+            lru.hits,
+            status
+        )
+        return res
     end
-
 end
-
-# function main()
-# end
 
